@@ -107,7 +107,9 @@ curl -L -o "paper-notes/<name>/paper.pdf" "<url>"
 mkdir -p paper-notes/<name>/images
 
 # 2. 提取全文文本
-python3 -c "
+# 注意：在 Kimi Code Web UI 环境中，使用项目自带的 uv venv Python
+PYTHON3="/home/phyytj/kimi_lens/paper-lens-backend/.venv/bin/python3"
+$PYTHON3 -c "
 import fitz
 doc = fitz.open('paper-notes/<name>/paper.pdf')
 text = ''
@@ -121,7 +123,7 @@ doc.close()
 
 # 3. 提取图片（动态定位脚本，兼容不同安装位置）
 EXTRACT_SCRIPT=$(find .claude/skills/paper-lens/scripts .agents/skills/paper-lens/scripts ~/.claude/skills/paper-lens/scripts -name "extract_figures.py" 2>/dev/null | head -1)
-python3 "$EXTRACT_SCRIPT" \
+$PYTHON3 "$EXTRACT_SCRIPT" \
     paper-notes/<name>/paper.pdf \
     paper-notes/<name>/images/
 ```
@@ -316,8 +318,8 @@ paper-notes/<paper-name>/
 ## 依赖
 
 ```bash
-# 核心依赖
-pip install pymupdf markdown
+# 核心依赖（在 Kimi Code Web UI 环境中已预装在 uv venv 中）
+# 如需手动安装，使用 uv pip install --project paper-lens-backend pymupdf markdown
 # 推荐（LaTeX 公式渲染为数学符号）
-pip install matplotlib
+# uv pip install --project paper-lens-backend matplotlib
 ```

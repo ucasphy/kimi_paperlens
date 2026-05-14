@@ -32,6 +32,15 @@ PAPER_NOTES_DIR = PROJECT_DIR / "paper-notes"
 # Server port — resolved once at startup, used by adapters
 SERVER_PORT = int(os.environ.get("PORT", 8765))
 
+# Path to project uv venv Python (has pymupdf, markdown, matplotlib installed)
+VENV_PYTHON = BASE_DIR / ".venv" / "bin" / "python3"
+if not VENV_PYTHON.exists():
+    # Fallback to system python3 if venv doesn't exist
+    VENV_PYTHON = Path("python3")
+
+# Global venv python path string (used in prompts / subprocess)
+VENV_PYTHON_STR = str(VENV_PYTHON)
+
 # Active sessions: session_id -> (adapter, last_active_timestamp)
 sessions: dict[str, tuple[KimiCLIAdapter, float]] = {}
 SESSION_TTL_SECONDS = 1800  # 30 minutes — covers long deep-learn turns + AskUserQuestion think time
@@ -193,6 +202,25 @@ async def get_paper_detail(paper_name: str):
     }
 
 
+def _extract_pdf_text_sync(pdf_path: Path, output_path: Path) -> bool:
+    """Extract text from PDF using backend's own Python process (which already has fitz)."""
+    try:
+        import fitz
+        doc = fitz.open(str(pdf_path))
+        text = ""
+        for i, page in enumerate(doc):
+            text += f"\n\n===== PAGE {i+1} =====\n\n"
+            text += page.get_text()
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        doc.close()
+        logger.info(f"Extracted text from {pdf_path} -> {output_path}")
+        return True
+    except Exception as e:
+        logger.warning(f"PDF text extraction failed: {e}")
+        return False
+
+
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...), name: str = Form("")):
     """Upload a PDF and save to paper-notes directory."""
@@ -211,7 +239,14 @@ async def upload_pdf(file: UploadFile = File(...), name: str = Form("")):
     content = await file.read()
     pdf_path.write_bytes(content)
 
-    return {"paper_name": paper_name, "pdf_path": str(pdf_path)}
+    # Auto-extract text in background
+    extracted_path = paper_dir / "extracted-text.md"
+    if _extract_pdf_text_sync(pdf_path, extracted_path):
+        logger.info(f"Extracted text for {paper_name}")
+    else:
+        logger.warning(f"Failed to extract text for {paper_name}")
+
+    return {"paper_name": paper_name, "pdf_path": str(pdf_path)},
 
 
 @app.post("/api/rename-paper")
@@ -282,6 +317,13 @@ async def download_pdf(paper_name: str = Form(...), url: str = Form(...)):
             raise HTTPException(400, "Downloaded file is not a valid PDF")
     else:
         raise HTTPException(400, "Download produced empty file")
+
+    # Auto-extract text in background
+    extracted_path = paper_dir / "extracted-text.md"
+    if _extract_pdf_text_sync(pdf_path, extracted_path):
+        logger.info(f"Extracted text for {paper_name}")
+    else:
+        logger.warning(f"Failed to extract text for {paper_name}")
 
     return {"ok": True, "path": str(pdf_path), "size": pdf_path.stat().st_size}
 
@@ -448,6 +490,25 @@ async def resume_session(
     adapter.session_id = session_id
     sessions[session_id] = (adapter, time.time())
     return {"session_id": session_id, "resumed": True}
+
+
+@app.post("/api/stop-session/{session_id}")
+async def stop_session(session_id: str):
+    """Stop an active session and kill the underlying kimi process."""
+    entry = sessions.pop(session_id, None)
+    if not entry:
+        raise HTTPException(404, "Session not found")
+
+    adapter, _ = entry
+    try:
+        await adapter.stop()
+    except Exception as e:
+        logger.warning(f"Error stopping session {session_id}: {e}")
+
+    # Also clear any pending MCP questions for this session
+    mcp_pending.pop(session_id, None)
+
+    return {"ok": True, "stopped": True}
 
 
 # ── SSE streaming endpoint (replaces browser WebSocket) ───────────────
@@ -640,14 +701,18 @@ def _backup_if_exists(paper_name: str, mode: str) -> None:
 
 def _build_prompt(paper_name: str, mode: str, pdf_url: str, message: str = "") -> str:
     """Build the initial prompt for paper-lens skill."""
+    paper_dir = PAPER_NOTES_DIR / paper_name
+    has_extracted = (paper_dir / "extracted-text.md").exists()
+
     if mode == "chat":
         # Free chat about a paper — don't invoke skill, just provide context
-        paper_dir = PAPER_NOTES_DIR / paper_name
         notes = []
         for f in sorted(paper_dir.glob("*.md")):
             if f.name not in ("extracted-text.md", "README.md", "download-summary.md"):
                 notes.append(f.name)
         context = f"用户正在查看论文 paper-notes/{paper_name}/。"
+        if has_extracted:
+            context += " 论文全文已提取到 `extracted-text.md`，请直接读取该文件了解论文内容。"
         if notes:
             context += f" 已有笔记：{', '.join(notes)}。请先读取相关笔记了解论文内容，然后回答用户的问题。"
         else:
@@ -668,7 +733,6 @@ def _build_prompt(paper_name: str, mode: str, pdf_url: str, message: str = "") -
         source = pdf_url
     else:
         # Find actual PDF file (may not be named paper.pdf)
-        paper_dir = PAPER_NOTES_DIR / paper_name
         pdf_files = list(paper_dir.glob("*.pdf")) if paper_dir.exists() else []
         if pdf_files:
             source = str(pdf_files[0])
@@ -688,12 +752,29 @@ def _build_prompt(paper_name: str, mode: str, pdf_url: str, message: str = "") -
     prompt = (
         f"你是 Paper Lens 论文阅读助手。请阅读并分析以下论文，按照「{mode_text}」的要求输出。\n\n"
         f"论文来源：{source}\n\n"
-        "[环境说明]\n"
-        "- 系统默认 Python 没有安装 PyMuPDF。如需读取 PDF，请使用以下 Python 路径：\n"
-        "  /home/phyytj/kimi_lens/paper-lens-backend/.venv/bin/python3\n"
-        "  该环境已预装 pymupdf (fitz)、reportlab 等依赖。\n"
-        "- 如需运行项目自带的 extract_figures.py / md_to_pdf.py，也请使用上述 Python 路径。\n\n"
-        "[Web UI 工具约束]\n"
+        "【强制约束 — 必须遵守，违反会导致流程卡住】\n"
+        "1. 绝对不要尝试安装任何 Python 包（如 pip install、apt install、conda install、pip3 等）。\n"
+        "   系统没有 pip，任何安装命令都会失败并浪费时间。\n"
+        "2. 绝对不要尝试用系统默认的 `python3` 或 `python` 运行需要 PyMuPDF 的脚本。\n"
+        "   系统 Python 没有安装 pymupdf，直接运行会报 ModuleNotFoundError。\n"
+        f"3. 所有需要 Python 的操作（包括读取 PDF、运行 extract_figures.py、md_to_pdf.py），"
+        f"   必须使用以下路径的 Python（已预装 pymupdf/markdown/matplotlib）：\n"
+        f"   {VENV_PYTHON_STR}\n"
+        "   示例：{VENV_PYTHON_STR} -c \"import fitz; ...\"\n"
+    )
+    if has_extracted:
+        prompt += (
+            "4. 论文全文文本已提前提取到 `paper-notes/" + paper_name + "/extracted-text.md`。"
+            "请直接读取该文件开始分析，不要再次尝试提取 PDF 文本。\n"
+        )
+    else:
+        prompt += (
+            "4. 论文全文文本尚未提取。请使用上述 Python 路径运行 PyMuPDF 提取文本，"
+            "保存到 `paper-notes/" + paper_name + "/extracted-text.md`，然后读取分析。\n"
+            "   不要尝试用 pdftotext、pdfplumber、pypdf 等其他工具。\n"
+        )
+    prompt += (
+        "\n[Web UI 工具约束]\n"
         "- 凡是 skill 文档里写的 `AskUserQuestion`，本环境下一律改用 "
         "`mcp__paper_lens__ask_user`（入参 schema 完全一致：questions=[{question, header, multiSelect, options:[{label, description}]}]）。"
         "本环境的 `AskUserQuestion` 不会真的等待用户回答，会被自动跳过。\n\n"

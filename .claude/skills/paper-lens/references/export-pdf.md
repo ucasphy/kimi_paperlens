@@ -40,7 +40,9 @@ if [ -z "$SCRIPT" ]; then
 fi
 
 # 执行转换
-python3 "$SCRIPT" "<markdown_path>" --style <style> --open
+# 在 Kimi Code Web UI 环境中，使用项目自带的 uv venv Python
+PYTHON3="/home/phyytj/kimi_lens/paper-lens-backend/.venv/bin/python3"
+$PYTHON3 "$SCRIPT" "<markdown_path>" --style <style> --open
 ```
 
 ### Step 4: 输出确认

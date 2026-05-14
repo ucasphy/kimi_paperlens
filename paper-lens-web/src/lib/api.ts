@@ -87,6 +87,12 @@ export const api = {
     });
   },
 
+  async stopSession(sessionId: string) {
+    return jsonFetch<{ ok: boolean; stopped: boolean }>(`/api/stop-session/${sessionId}`, {
+      method: "POST",
+    });
+  },
+
   async sendAnswer(sessionId: string, answers: Record<string, string | string[]>) {
     return jsonFetch<{ ok: boolean }>(`/api/answer/${sessionId}`, {
       method: "POST",

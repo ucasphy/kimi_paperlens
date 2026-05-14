@@ -159,6 +159,16 @@ export default function Page() {
     }
   }
 
+  async function handleStop() {
+    if (!sessionId) return;
+    try {
+      await api.stopSession(sessionId);
+      toast.info("已停止当前会话");
+    } catch (e) {
+      toast.error("停止失败", { description: String(e) });
+    }
+  }
+
   function handleModeClick(m: Mode) {
     setMode(m);
     if (currentPaper) handleStart(m, input);
@@ -297,6 +307,7 @@ export default function Page() {
                     onChange={setInput}
                     onSubmit={handleSend}
                     busy={busy}
+                    onStop={handleStop}
                   />
                 </div>
               </div>
