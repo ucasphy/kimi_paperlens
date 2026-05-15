@@ -14,6 +14,7 @@ import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ThemeSwitcher } from "@/components/theme/theme-switcher";
+import { SettingsButton } from "@/components/settings/settings-dialog";
 import { toast } from "sonner";
 
 export function AppSidebar() {
@@ -79,6 +80,7 @@ export function AppSidebar() {
         </div>
         <NotificationButton />
         <ThemeSwitcher />
+        <SettingsButton />
       </header>
 
 

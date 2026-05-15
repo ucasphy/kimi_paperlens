@@ -119,4 +119,20 @@ export const api = {
       body: fd,
     });
   },
+
+  async getConfig(): Promise<{
+    kimi_config_path: string;
+    has_api_key: boolean;
+    api_key_masked: string | null;
+    has_oauth: boolean;
+    auth_method: string;
+  }> {
+    return jsonFetch("/api/config");
+  },
+
+  async updateConfig(apiKey: string): Promise<{ ok: boolean; auth_method: string }> {
+    const fd = new FormData();
+    fd.append("api_key", apiKey);
+    return jsonFetch("/api/config", { method: "POST", body: fd });
+  },
 };

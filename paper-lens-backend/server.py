@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from dataclasses import asdict
@@ -369,6 +370,119 @@ async def open_external(paper_name: str = Form(...), file_name: str = Form(""), 
                 subprocess.Popen(["open", str(target_path)])
 
     return {"ok": True, "path": str(target_path)}
+
+
+# ── Kimi CLI config (API key) ──────────────────────────────────────────
+
+KIMI_CONFIG_PATH = Path.home() / ".kimi" / "config.toml"
+
+
+def _read_kimi_config() -> dict:
+    """Read Kimi CLI config.toml. Returns empty dict if not found."""
+    if not KIMI_CONFIG_PATH.exists():
+        return {}
+    try:
+        import tomllib
+        with open(KIMI_CONFIG_PATH, "rb") as f:
+            return tomllib.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to read kimi config: {e}")
+        return {}
+
+
+def _mask_key(key: str) -> str:
+    """Mask an API key for display (keep first 4 and last 4 chars)."""
+    if len(key) <= 8:
+        return "****"
+    return key[:4] + "****" + key[-4:]
+
+
+def _write_kimi_api_key(api_key: str) -> bool:
+    """Write API key to Kimi CLI config.toml. Returns True on success."""
+    try:
+        KIMI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if KIMI_CONFIG_PATH.exists():
+            text = KIMI_CONFIG_PATH.read_text(encoding="utf-8")
+        else:
+            text = ""
+
+        # Update or insert api_key under [providers."managed:kimi-code"]
+        provider_section = '[providers."managed:kimi-code"]'
+        if provider_section not in text:
+            # Append minimal provider section
+            if text and not text.endswith("\n"):
+                text += "\n"
+            text += f'{provider_section}\ntype = "kimi"\nbase_url = "https://api.kimi.com/coding/v1"\napi_key = ""\n'
+
+        # Replace existing api_key line in the provider section
+        lines = text.splitlines()
+        in_provider_section = False
+        updated = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped == provider_section:
+                in_provider_section = True
+                continue
+            if in_provider_section and stripped.startswith("[") and stripped.endswith("]"):
+                in_provider_section = False
+                continue
+            if in_provider_section and stripped.startswith("api_key"):
+                lines[i] = f'api_key = "{api_key}"'
+                updated = True
+                break
+
+        if not updated:
+            # Insert api_key right after the provider section header
+            for i, line in enumerate(lines):
+                if line.strip() == provider_section:
+                    lines.insert(i + 1, f'api_key = "{api_key}"')
+                    break
+
+        KIMI_CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to write kimi api_key: {e}")
+        return False
+
+
+@app.get("/api/config")
+async def get_config():
+    """Get Kimi CLI configuration status (API key masked, OAuth status)."""
+    config = _read_kimi_config()
+    provider = config.get("providers", {}).get("managed:kimi-code", {})
+    api_key = provider.get("api_key", "")
+    has_api_key = bool(api_key and api_key.strip())
+
+    # Check OAuth token file existence
+    oauth = provider.get("oauth", {})
+    oauth_storage = oauth.get("storage", "")
+    oauth_key = oauth.get("key", "")
+    has_oauth = False
+    if oauth_storage == "file" and oauth_key:
+        oauth_path = KIMI_CONFIG_PATH.parent / oauth_key
+        has_oauth = oauth_path.exists()
+
+    return {
+        "kimi_config_path": str(KIMI_CONFIG_PATH),
+        "has_api_key": has_api_key,
+        "api_key_masked": _mask_key(api_key) if has_api_key else None,
+        "has_oauth": has_oauth,
+        "auth_method": "api_key" if has_api_key else ("oauth" if has_oauth else "none"),
+    }
+
+
+@app.post("/api/config")
+async def update_config(api_key: str = Form(...)):
+    """Update Kimi CLI API key."""
+    key = api_key.strip()
+    if not key:
+        raise HTTPException(400, "API key cannot be empty")
+    if len(key) < 8:
+        raise HTTPException(400, "API key looks too short")
+
+    if _write_kimi_api_key(key):
+        return {"ok": True, "auth_method": "api_key"}
+    raise HTTPException(500, "Failed to write config file")
 
 
 @app.post("/api/save-file")
